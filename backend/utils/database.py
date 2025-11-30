@@ -17,3 +17,4 @@ def get_database():
 # Global database instance
 db = get_database()
 
+

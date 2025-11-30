@@ -11,7 +11,7 @@ class GeminiService:
         
         # Try different models in order of preference
         self.models = [
-            'gemini-pro',
+            'gemini-2.5-flash',
             'gemini-pro-vision'
         ]
         self.current_model = None

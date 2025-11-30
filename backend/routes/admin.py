@@ -199,3 +199,4 @@ class AdminUserResource(Resource):
                 'success': False,
                 'error': 'Failed to delete user'
             }), 500
+

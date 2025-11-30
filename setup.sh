@@ -67,3 +67,4 @@ echo "   Backend API: http://localhost:5000"
 echo ""
 echo "📖 For detailed setup instructions, see README.md"
 
+

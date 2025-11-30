@@ -98,6 +98,7 @@ class ChatbotResource(Resource):
                 'success': True,
                 'message': message,
                 'response': fallback_response,
+                'exception': str(e),
                 'timestamp': datetime.now().isoformat(),
                 'user_id': user_id
             }, 200

@@ -41,6 +41,7 @@ yarn-error.log*
 lerna-debug.log*
 
 # React build
+frontend/node_modules
 frontend/build/
 frontend/.env.local
 frontend/.env.development.local
@@ -74,4 +75,5 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
 

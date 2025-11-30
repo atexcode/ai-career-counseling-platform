@@ -207,3 +207,4 @@ class NotificationsResource(Resource):
         except jwt.InvalidTokenError:
             return None
 
+
