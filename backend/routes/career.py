@@ -4,11 +4,16 @@ import jwt
 import os
 from datetime import datetime
 import sys
+import logging
+import threading
+import queue
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.career import CareerModel
 from models.user import UserModel
 from services.gemini_service import GeminiService
 from utils.database import db
+
+logger = logging.getLogger(__name__)
 
 class CareerResource(Resource):
     def __init__(self):
@@ -49,24 +54,85 @@ class CareerResource(Resource):
         if not user:
             return {'error': 'User not found'}, 404
         
-        # Get AI recommendations
+        # Check if Gemini is available before trying to use it
+        if not self.gemini_service.current_model:
+            # Use fallback immediately if Gemini is not available
+            return self._get_fallback_recommendations(user_id, user)
+        
+        # Get AI recommendations with timeout (only if Gemini is available)
         try:
-            recommendations = self.gemini_service.get_career_recommendations(user)
+            # Use threading with timeout to prevent blocking
+            result_queue = queue.Queue()
+            exception_queue = queue.Queue()
+            
+            def get_recommendations():
+                try:
+                    recommendations = self.gemini_service.get_career_recommendations(user)
+                    result_queue.put(recommendations)
+                except Exception as e:
+                    exception_queue.put(e)
+            
+            thread = threading.Thread(target=get_recommendations)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=8)  # 8 second timeout
+            
+            if thread.is_alive():
+                logger.warning("Gemini call timed out, using fallback")
+                return self._get_fallback_recommendations(user_id, user)
+            
+            if not exception_queue.empty():
+                raise exception_queue.get()
+            
+            if result_queue.empty():
+                raise Exception("No recommendations received")
+            
+            recommendations = result_queue.get()
             
             # Check if recommendations is empty (Gemini failed)
             if not recommendations or recommendations == []:
                 raise Exception("Gemini service returned empty recommendations")
             
+            # Transform Gemini response to match frontend expectations
+            transformed_recommendations = self._transform_recommendations(recommendations)
+            
             return {
                 'success': True,
                 'user_id': user_id,
-                'recommendations': recommendations,
+                'recommendations': transformed_recommendations,
                 'timestamp': datetime.now().isoformat()
             }, 200
         except Exception as e:
+            logger.warning(f"Gemini recommendations failed, using fallback: {e}")
             # Fallback to basic career recommendations
-            careers = self.career_model.get_all_careers(limit=5)
-            recommendations = []
+            return self._get_fallback_recommendations(user_id, user)
+    
+    def _transform_recommendations(self, recommendations):
+        """Transform Gemini recommendations to match frontend format"""
+        transformed = []
+        for idx, rec in enumerate(recommendations):
+            transformed.append({
+                'id': rec.get('id', f'gemini_{idx}'),
+                'title': rec.get('career_name', rec.get('title', 'Unknown Career')),
+                'description': rec.get('reason', rec.get('description', '')),
+                'industry': rec.get('industry', 'Technology'),
+                'experience_level': rec.get('experience_level', 'Mid Level'),
+                'salary_range': rec.get('salary_range', 'Not specified'),
+                'work_type': rec.get('work_type', 'Full-time'),
+                'required_skills': rec.get('required_skills', []),
+                'match_score': rec.get('match_score', 75),
+                'growth_potential': rec.get('growth_potential', 'medium'),
+                'education_requirements': rec.get('education_requirements', '')
+            })
+        return transformed
+    
+    def _get_fallback_recommendations(self, user_id, user):
+        """Get fallback career recommendations"""
+        careers = self.career_model.get_all_careers(limit=5)
+        recommendations = []
+        
+        # If database has careers, use them
+        if careers:
             for career in careers:
                 recommendations.append({
                     'id': career['_id'],
@@ -79,13 +145,77 @@ class CareerResource(Resource):
                     'required_skills': career.get('required_skills', []),
                     'match_score': 75  # Default match score
                 })
+        else:
+            # Hardcoded fallback recommendations when database is empty
+            user_skills = user.get('skills', [])
+            user_interests = user.get('interests', [])
             
-            return {
-                'success': True,
-                'user_id': user_id,
-                'recommendations': recommendations,
-                'timestamp': datetime.now().isoformat()
-            }, 200
+            fallback_careers = [
+                {
+                    'id': 'fallback_1',
+                    'title': 'Software Developer',
+                    'description': 'Develop and maintain software applications. Work on creating innovative solutions using programming languages and frameworks.',
+                    'industry': 'Technology',
+                    'experience_level': 'Mid Level',
+                    'salary_range': '$70,000 - $120,000',
+                    'work_type': 'Full-time',
+                    'required_skills': ['Programming', 'Problem Solving', 'Software Development'],
+                    'match_score': 85
+                },
+                {
+                    'id': 'fallback_2',
+                    'title': 'Data Scientist',
+                    'description': 'Analyze complex data to help organizations make data-driven decisions. Use statistical methods and machine learning algorithms.',
+                    'industry': 'Technology',
+                    'experience_level': 'Mid Level',
+                    'salary_range': '$90,000 - $150,000',
+                    'work_type': 'Full-time',
+                    'required_skills': ['Data Analysis', 'Machine Learning', 'Python', 'Statistics'],
+                    'match_score': 80
+                },
+                {
+                    'id': 'fallback_3',
+                    'title': 'DevOps Engineer',
+                    'description': 'Bridge the gap between development and operations. Automate deployment processes and manage cloud infrastructure.',
+                    'industry': 'Technology',
+                    'experience_level': 'Mid Level',
+                    'salary_range': '$85,000 - $140,000',
+                    'work_type': 'Full-time',
+                    'required_skills': ['DevOps', 'Cloud Computing', 'Automation', 'CI/CD'],
+                    'match_score': 75
+                },
+                {
+                    'id': 'fallback_4',
+                    'title': 'Full Stack Developer',
+                    'description': 'Work on both frontend and backend development. Build complete web applications from user interface to server logic.',
+                    'industry': 'Technology',
+                    'experience_level': 'Entry Level',
+                    'salary_range': '$60,000 - $100,000',
+                    'work_type': 'Full-time',
+                    'required_skills': ['JavaScript', 'React', 'Node.js', 'Database Management'],
+                    'match_score': 82
+                },
+                {
+                    'id': 'fallback_5',
+                    'title': 'Product Manager',
+                    'description': 'Lead product development from conception to launch. Work with cross-functional teams to deliver products that meet user needs.',
+                    'industry': 'Technology',
+                    'experience_level': 'Mid Level',
+                    'salary_range': '$95,000 - $160,000',
+                    'work_type': 'Full-time',
+                    'required_skills': ['Product Management', 'Communication', 'Strategic Thinking', 'Project Management'],
+                    'match_score': 78
+                }
+            ]
+            
+            recommendations = fallback_careers
+        
+        return {
+            'success': True,
+            'user_id': user_id,
+            'recommendations': recommendations,
+            'timestamp': datetime.now().isoformat()
+        }, 200
     
     def _get_all_careers(self):
         """Get all careers or search careers"""

@@ -4,9 +4,14 @@ import jwt
 import os
 from datetime import datetime
 import sys
+import logging
+import threading
+import queue
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.gemini_service import GeminiService
 from utils.database import db
+
+logger = logging.getLogger(__name__)
 
 class JobMarketResource(Resource):
     def __init__(self):
@@ -28,70 +33,77 @@ class JobMarketResource(Resource):
         career_field = request.args.get('career_field', 'Technology')
         user_id = request.args.get('user_id')
         
-        # Get AI job market analysis
+        # Check if Gemini is available before trying to use it
+        if not self.gemini_service.current_model:
+            # Use fallback immediately if Gemini is not available
+            fallback_analysis = self._get_fallback_analysis(career_field)
+            return {
+                'success': True,
+                'career_field': career_field,
+                'analysis': fallback_analysis,
+                'timestamp': datetime.now().isoformat()
+            }, 200
+        
+        # Get AI job market analysis with timeout (only if Gemini is available)
         try:
-            analysis = self.gemini_service.get_job_market_analysis(career_field)
+            # Use threading with timeout to prevent blocking
+            result_queue = queue.Queue()
+            exception_queue = queue.Queue()
+            
+            def get_analysis():
+                try:
+                    analysis = self.gemini_service.get_job_market_analysis(career_field)
+                    result_queue.put(analysis)
+                except Exception as e:
+                    exception_queue.put(e)
+            
+            thread = threading.Thread(target=get_analysis)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=8)  # 8 second timeout
+            
+            if thread.is_alive():
+                logger.warning("Gemini call timed out, using fallback")
+                fallback_analysis = self._get_fallback_analysis(career_field)
+                return {
+                    'success': True,
+                    'career_field': career_field,
+                    'analysis': fallback_analysis,
+                    'timestamp': datetime.now().isoformat()
+                }, 200
+            
+            if not exception_queue.empty():
+                raise exception_queue.get()
+            
+            if result_queue.empty():
+                raise Exception("No analysis received")
+            
+            analysis = result_queue.get()
             
             # Check if analysis is empty (Gemini failed)
             if not analysis or analysis == {}:
                 raise Exception("Gemini service returned empty analysis")
             
-            # Store analysis in database for caching
-            self._store_analysis(career_field, analysis)
+            # Transform Gemini response to match frontend expectations
+            transformed_analysis = self._transform_job_market_analysis(analysis, career_field)
+            
+            # Store analysis in database for caching (non-blocking)
+            try:
+                self._store_analysis(career_field, transformed_analysis)
+            except Exception as e:
+                logger.warning(f"Failed to store analysis: {e}")
             
             return {
                 'success': True,
                 'career_field': career_field,
-                'analysis': analysis,
+                'analysis': transformed_analysis,
                 'timestamp': datetime.now().isoformat()
             }, 200
             
         except Exception as e:
+            logger.warning(f"Gemini analysis failed, using fallback: {e}")
             # Fallback analysis
-            fallback_analysis = {
-                'overall_trends': {
-                    'trend': 'Up',
-                    'description': f'The {career_field} industry is experiencing strong growth with increasing demand for skilled professionals.'
-                },
-                'average_salary': 75000,
-                'industry_analysis': [
-                    {
-                        'name': 'Software Development',
-                        'trend': 'Up',
-                        'growth': '15%',
-                        'key_roles': ['Software Engineer', 'Full Stack Developer', 'DevOps Engineer']
-                    },
-                    {
-                        'name': 'Data Science',
-                        'trend': 'Up',
-                        'growth': '20%',
-                        'key_roles': ['Data Scientist', 'Data Analyst', 'Machine Learning Engineer']
-                    },
-                    {
-                        'name': 'Cybersecurity',
-                        'trend': 'Up',
-                        'growth': '25%',
-                        'key_roles': ['Security Analyst', 'Penetration Tester', 'Security Architect']
-                    }
-                ],
-                'top_locations': [
-                    {
-                        'name': 'San Francisco',
-                        'job_openings': 15000,
-                        'average_salary': 120000
-                    },
-                    {
-                        'name': 'New York',
-                        'job_openings': 12000,
-                        'average_salary': 110000
-                    },
-                    {
-                        'name': 'Seattle',
-                        'job_openings': 8000,
-                        'average_salary': 105000
-                    }
-                ]
-            }
+            fallback_analysis = self._get_fallback_analysis(career_field)
             
             return {
                 'success': True,
@@ -99,6 +111,92 @@ class JobMarketResource(Resource):
                 'analysis': fallback_analysis,
                 'timestamp': datetime.now().isoformat()
             }, 200
+    
+    def _transform_job_market_analysis(self, analysis, career_field):
+        """Transform Gemini job market analysis to match frontend format"""
+        # Ensure overall_trends structure
+        if 'overall_trends' not in analysis or not isinstance(analysis['overall_trends'], dict):
+            analysis['overall_trends'] = {
+                'trend': analysis.get('trend', 'Up'),
+                'description': analysis.get('market_trends', analysis.get('description', f'The {career_field} industry is experiencing growth.'))
+            }
+        
+        # Ensure average_salary is a number
+        if 'average_salary' not in analysis:
+            # Try to extract from salary_range if available
+            salary_range = analysis.get('salary_range', '')
+            if isinstance(salary_range, str) and '$' in salary_range:
+                # Try to extract number
+                import re
+                numbers = re.findall(r'\d+', salary_range.replace(',', ''))
+                if numbers:
+                    analysis['average_salary'] = int(sum([int(n) for n in numbers]) / len(numbers))
+                else:
+                    analysis['average_salary'] = 75000
+            else:
+                analysis['average_salary'] = 75000
+        elif isinstance(analysis['average_salary'], str):
+            # Convert string to number if needed
+            import re
+            numbers = re.findall(r'\d+', analysis['average_salary'].replace(',', ''))
+            analysis['average_salary'] = int(numbers[0]) if numbers else 75000
+        
+        # Ensure industry_analysis is an array
+        if 'industry_analysis' not in analysis or not isinstance(analysis['industry_analysis'], list):
+            analysis['industry_analysis'] = []
+        
+        # Ensure top_locations is an array
+        if 'top_locations' not in analysis or not isinstance(analysis['top_locations'], list):
+            analysis['top_locations'] = []
+        
+        return analysis
+    
+    def _get_fallback_analysis(self, career_field):
+        """Get fallback job market analysis"""
+        return {
+            'overall_trends': {
+                'trend': 'Up',
+                'description': f'The {career_field} industry is experiencing strong growth with increasing demand for skilled professionals.'
+            },
+            'average_salary': 75000,
+            'industry_analysis': [
+                {
+                    'name': 'Software Development',
+                    'trend': 'Up',
+                    'growth': '15%',
+                    'key_roles': ['Software Engineer', 'Full Stack Developer', 'DevOps Engineer']
+                },
+                {
+                    'name': 'Data Science',
+                    'trend': 'Up',
+                    'growth': '20%',
+                    'key_roles': ['Data Scientist', 'Data Analyst', 'Machine Learning Engineer']
+                },
+                {
+                    'name': 'Cybersecurity',
+                    'trend': 'Up',
+                    'growth': '25%',
+                    'key_roles': ['Security Analyst', 'Penetration Tester', 'Security Architect']
+                }
+            ],
+            'top_locations': [
+                {
+                    'name': 'San Francisco',
+                    'job_openings': 15000,
+                    'average_salary': 120000
+                },
+                {
+                    'name': 'New York',
+                    'job_openings': 12000,
+                    'average_salary': 110000
+                },
+                {
+                    'name': 'Seattle',
+                    'job_openings': 8000,
+                    'average_salary': 105000
+                }
+            ]
+        }
     
     def post(self):
         """Create job market entry (admin only)"""
