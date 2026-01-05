@@ -228,3 +228,4 @@ class CareerMilestoneResource(Resource):
                 'error': 'Failed to update career milestone'
             }), 500
 
+
