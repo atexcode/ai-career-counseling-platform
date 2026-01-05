@@ -76,8 +76,15 @@ brew services start mongodb/brew/mongodb-community
 
 1. **Clone the repository:**
 ```bash
-git clone <repository-url>
+git clone https://github.com/atexcode/ai-career-counseling-platform.git
 cd vu_fyp
+```
+
+update ``backand\.env`` file and add you variables (keep default if it works)
+
+1.1. **Seed Database**
+```bash
+python seed_database.py
 ```
 
 2. **Backend Setup:**
