@@ -54,14 +54,28 @@ class SkillsResource(Resource):
         if not user:
             return {'error': 'User not found'}, 404
         
-        # Get target career from query params or use default
-        target_career = request.args.get('career', 'Software Developer')
+        # Remove system fields from user profile for analysis
+        user_profile = {k: v for k, v in user.items() if k not in ['_id', 'password', 'created_at', 'updated_at', 'is_active', 'token']}
+        
         user_skills = user.get('skills', [])
+        career_goals = user.get('career_goals', [])
+        goals_text = user.get('goals', '')
+        
+        # Determine target career from user profile or query params
+        target_career = request.args.get('career')
+        if not target_career:
+            if career_goals and len(career_goals) > 0:
+                target_career = career_goals[0] if isinstance(career_goals, list) else str(career_goals)
+            elif goals_text:
+                # Extract first meaningful career mention (simplified)
+                target_career = goals_text.split('.')[0][:50] if goals_text else 'Career Development'
+            else:
+                target_career = 'Career Development'
         
         # Check if Gemini is available before trying to use it
         if not self.gemini_service.current_model:
             # Use fallback immediately if Gemini is not available
-            return self._get_fallback_skills_analysis(user_id, user_skills, target_career)
+            return self._get_fallback_skills_analysis(user_id, user_profile, target_career)
         
         # Get AI skills gap analysis with timeout (only if Gemini is available)
         try:
@@ -71,7 +85,7 @@ class SkillsResource(Resource):
             
             def get_analysis():
                 try:
-                    gap_analysis = self.gemini_service.analyze_skills_gap(user_skills, target_career)
+                    gap_analysis = self.gemini_service.analyze_skills_gap(user_profile, target_career)
                     result_queue.put(gap_analysis)
                 except Exception as e:
                     exception_queue.put(e)
@@ -79,11 +93,11 @@ class SkillsResource(Resource):
             thread = threading.Thread(target=get_analysis)
             thread.daemon = True
             thread.start()
-            thread.join(timeout=8)  # 8 second timeout
+            thread.join(timeout=15)  # Increased timeout to 15 seconds for more complex analysis
             
             if thread.is_alive():
                 logger.warning("Gemini call timed out, using fallback")
-                return self._get_fallback_skills_analysis(user_id, user_skills, target_career)
+                return self._get_fallback_skills_analysis(user_id, user_profile, target_career)
             
             if not exception_queue.empty():
                 raise exception_queue.get()
@@ -112,7 +126,7 @@ class SkillsResource(Resource):
         except Exception as e:
             logger.warning(f"Gemini skills analysis failed, using fallback: {e}")
             # Fallback analysis
-            return self._get_fallback_skills_analysis(user_id, user_skills, target_career)
+            return self._get_fallback_skills_analysis(user_id, user_profile, target_career)
     
     def _transform_skills_analysis(self, gap_analysis, user_skills, target_career):
         """Transform Gemini skills analysis to match frontend format"""
@@ -145,23 +159,84 @@ class SkillsResource(Resource):
             'learning_recommendations': learning_recommendations if learning_recommendations else []
         }
     
-    def _get_fallback_skills_analysis(self, user_id, user_skills, target_career):
-        """Get fallback skills gap analysis"""
-        common_skills = ['Python', 'JavaScript', 'SQL', 'Git', 'Problem Solving', 'Communication', 'Teamwork', 'Project Management']
-        missing_skills = [skill for skill in common_skills if skill not in user_skills]
+    def _get_fallback_skills_analysis(self, user_id, user_profile, target_career):
+        """Get fallback skills gap analysis based on user profile"""
+        user_skills = user_profile.get('skills', [])
+        experience_level = user_profile.get('experience_level', 'beginner')
+        career_goals = user_profile.get('career_goals', [])
+        interests = user_profile.get('interests', [])
+        
+        # Generate skills based on target career and user profile
+        # This is a smart fallback that adapts to user data
+        career_skill_map = {
+            'software developer': ['Python', 'JavaScript', 'Git', 'SQL', 'Problem Solving', 'Algorithms', 'Data Structures'],
+            'data scientist': ['Python', 'R', 'SQL', 'Machine Learning', 'Statistics', 'Data Analysis', 'Pandas'],
+            'web developer': ['JavaScript', 'HTML', 'CSS', 'React', 'Node.js', 'Git', 'REST APIs'],
+            'mobile developer': ['Java', 'Kotlin', 'Swift', 'React Native', 'Git', 'Mobile UI/UX'],
+            'devops engineer': ['Linux', 'Docker', 'Kubernetes', 'CI/CD', 'Cloud Computing', 'Scripting', 'Monitoring'],
+            'ui/ux designer': ['Figma', 'Adobe XD', 'User Research', 'Prototyping', 'Design Systems', 'HTML/CSS'],
+            'project manager': ['Project Management', 'Agile', 'Scrum', 'Communication', 'Leadership', 'Risk Management'],
+            'business analyst': ['SQL', 'Data Analysis', 'Requirements Gathering', 'Documentation', 'Stakeholder Management'],
+        }
+        
+        # Try to match target career to skill map (case-insensitive)
+        target_lower = target_career.lower()
+        required_skills = None
+        
+        for career_key, skills in career_skill_map.items():
+            if career_key in target_lower or any(keyword in target_lower for keyword in career_key.split()):
+                required_skills = skills
+                break
+        
+        # If no match, use skills based on user interests or default
+        if not required_skills:
+            if interests:
+                # Use generic tech skills if user has tech interests
+                tech_keywords = ['technology', 'coding', 'programming', 'software', 'tech', 'computer', 'web', 'app']
+                if any(keyword in ' '.join(interests).lower() for keyword in tech_keywords):
+                    required_skills = ['Python', 'JavaScript', 'Git', 'Problem Solving', 'Communication']
+                else:
+                    required_skills = ['Communication', 'Problem Solving', 'Teamwork', 'Project Management', 'Critical Thinking']
+            else:
+                required_skills = ['Communication', 'Problem Solving', 'Teamwork', 'Project Management', 'Leadership']
+        
+        # Adjust required skills based on experience level
+        if experience_level == 'beginner':
+            # Focus on foundational skills
+            required_skills = [s for s in required_skills if s not in ['Algorithms', 'Machine Learning', 'Kubernetes', 'CI/CD']]
+        elif experience_level == 'advanced' or experience_level == 'expert':
+            # Add advanced skills
+            if 'Python' in required_skills:
+                required_skills.extend(['System Design', 'Architecture', 'Performance Optimization'])
+        
+        # Remove duplicates and find missing skills
+        required_skills = list(dict.fromkeys(required_skills))  # Preserve order while removing duplicates
+        missing_skills = [skill for skill in required_skills if skill not in user_skills]
+        
+        # Generate learning recommendations
+        learning_recommendations = []
+        for skill in missing_skills[:5]:  # Limit to 5 recommendations
+            learning_recommendations.append({
+                'skill': skill,
+                'description': f'Learn {skill} to advance your career in {target_career}. Essential for {experience_level} level professionals.',
+                'resources': [
+                    f'Online {skill} courses (Coursera, Udemy, edX)',
+                    f'{skill} official documentation',
+                    f'{skill} practice projects and tutorials',
+                    'Join online communities and forums'
+                ],
+                'projects': [
+                    f'Build a {skill} project',
+                    f'Complete {skill} exercises and challenges',
+                    f'Create a portfolio showcasing {skill}'
+                ]
+            })
         
         fallback_analysis = {
             'user_skills': user_skills,
-            'required_skills_for_goals': common_skills,
+            'required_skills_for_goals': required_skills,
             'skills_gap': missing_skills,
-            'learning_recommendations': [
-                {
-                    'skill': skill,
-                    'description': f'Learn {skill} to improve your career prospects in {target_career}',
-                    'resources': ['Online courses', 'Documentation', 'Practice projects', 'Tutorials'],
-                    'projects': [f'Build a {skill} project', f'Practice {skill} exercises', f'Create a {skill} portfolio']
-                } for skill in missing_skills[:3]
-            ]
+            'learning_recommendations': learning_recommendations
         }
         
         return {

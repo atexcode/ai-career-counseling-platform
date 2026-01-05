@@ -77,8 +77,12 @@ class UserResource(Resource):
         except Exception as e:
             return {'error': 'Invalid JSON data'}, 400
         
-        # Remove None values and password
-        update_data = {k: v for k, v in update_data.items() if v is not None and k != 'password'}
+        # System fields that should not be updated directly
+        system_fields = {'password', '_id', 'created_at', 'updated_at', 'is_active'}
+        
+        # Remove None values, password, and system fields - allow all other dynamic fields
+        update_data = {k: v for k, v in update_data.items() 
+                      if v is not None and k not in system_fields}
         
         if not update_data:
             return {'error': 'No data to update'}, 400

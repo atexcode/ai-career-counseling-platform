@@ -9,6 +9,7 @@ import threading
 import queue
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.gemini_service import GeminiService
+from models.user import UserModel
 from utils.database import db
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 class JobMarketResource(Resource):
     def __init__(self):
         self.gemini_service = GeminiService()
+        self.user_model = UserModel(db)
         self.parser = reqparse.RequestParser()
     
     def get(self):
@@ -29,14 +31,42 @@ class JobMarketResource(Resource):
         if not payload:
             return {'error': 'Invalid token'}, 401
         
-        # Get career field from query params or use default
-        career_field = request.args.get('career_field', 'Technology')
+        # Get filters from query params
         user_id = request.args.get('user_id')
+        industry = request.args.get('industry', '')
+        location = request.args.get('location', '')
+        experience_level = request.args.get('experience_level', '')
+        career_field = request.args.get('career_field', '')
+        
+        # Get user profile if user_id is provided
+        user_profile = None
+        if user_id:
+            user = self.user_model.get_user_by_id(user_id)
+            if user:
+                # Remove system fields from user profile
+                user_profile = {k: v for k, v in user.items() 
+                              if k not in ['_id', 'password', 'created_at', 'updated_at', 'is_active', 'token']}
+        
+        # Determine career field from user profile or use default
+        if not career_field:
+            if user_profile:
+                career_goals = user_profile.get('career_goals', [])
+                goals_text = user_profile.get('goals', '')
+                if career_goals and len(career_goals) > 0:
+                    career_field = career_goals[0] if isinstance(career_goals, list) else str(career_goals)
+                elif goals_text:
+                    career_field = goals_text.split('.')[0][:50] if goals_text else 'Technology'
+                elif user_profile.get('preferred_industries'):
+                    career_field = user_profile.get('preferred_industries')[0]
+                else:
+                    career_field = industry if industry else 'Technology'
+            else:
+                career_field = industry if industry else 'Technology'
         
         # Check if Gemini is available before trying to use it
         if not self.gemini_service.current_model:
             # Use fallback immediately if Gemini is not available
-            fallback_analysis = self._get_fallback_analysis(career_field)
+            fallback_analysis = self._get_fallback_analysis(user_profile, career_field, industry, location, experience_level)
             return {
                 'success': True,
                 'career_field': career_field,
@@ -52,7 +82,13 @@ class JobMarketResource(Resource):
             
             def get_analysis():
                 try:
-                    analysis = self.gemini_service.get_job_market_analysis(career_field)
+                    analysis = self.gemini_service.get_job_market_analysis(
+                        user_profile=user_profile,
+                        career_field=career_field,
+                        industry=industry if industry else None,
+                        location=location if location else None,
+                        experience_level=experience_level if experience_level else None
+                    )
                     result_queue.put(analysis)
                 except Exception as e:
                     exception_queue.put(e)
@@ -60,11 +96,11 @@ class JobMarketResource(Resource):
             thread = threading.Thread(target=get_analysis)
             thread.daemon = True
             thread.start()
-            thread.join(timeout=8)  # 8 second timeout
+            thread.join(timeout=15)  # Increased timeout to 15 seconds for more complex analysis
             
             if thread.is_alive():
                 logger.warning("Gemini call timed out, using fallback")
-                fallback_analysis = self._get_fallback_analysis(career_field)
+                fallback_analysis = self._get_fallback_analysis(user_profile, career_field, industry, location, experience_level)
                 return {
                     'success': True,
                     'career_field': career_field,
@@ -87,12 +123,6 @@ class JobMarketResource(Resource):
             # Transform Gemini response to match frontend expectations
             transformed_analysis = self._transform_job_market_analysis(analysis, career_field)
             
-            # Store analysis in database for caching (non-blocking)
-            try:
-                self._store_analysis(career_field, transformed_analysis)
-            except Exception as e:
-                logger.warning(f"Failed to store analysis: {e}")
-            
             return {
                 'success': True,
                 'career_field': career_field,
@@ -103,7 +133,7 @@ class JobMarketResource(Resource):
         except Exception as e:
             logger.warning(f"Gemini analysis failed, using fallback: {e}")
             # Fallback analysis
-            fallback_analysis = self._get_fallback_analysis(career_field)
+            fallback_analysis = self._get_fallback_analysis(user_profile, career_field, industry, location, experience_level)
             
             return {
                 'success': True,
@@ -151,51 +181,101 @@ class JobMarketResource(Resource):
         
         return analysis
     
-    def _get_fallback_analysis(self, career_field):
-        """Get fallback job market analysis"""
+    def _get_fallback_analysis(self, user_profile=None, career_field='Technology', industry='', location='', experience_level=''):
+        """Get fallback job market analysis based on filters and user profile"""
+        # Base salary adjustments by experience level
+        base_salary = 75000
+        if experience_level == 'Entry Level':
+            base_salary = 50000
+        elif experience_level == 'Mid Level':
+            base_salary = 75000
+        elif experience_level == 'Senior Level':
+            base_salary = 110000
+        elif experience_level == 'Executive Level':
+            base_salary = 150000
+        
+        # Location-based salary adjustments
+        location_multipliers = {
+            'San Francisco': 1.5,
+            'New York': 1.4,
+            'Seattle': 1.3,
+            'Boston': 1.2,
+            'Austin': 1.1,
+            'Chicago': 1.1,
+            'Denver': 1.05,
+            'Atlanta': 1.0,
+            'Philadelphia': 1.0,
+            'Remote': 0.95
+        }
+        
+        # Industry-based analysis
+        industry_analysis_map = {
+            'Technology': [
+                {'name': 'Software Development', 'trend': 'Up', 'growth': '15%', 'key_roles': ['Software Engineer', 'Full Stack Developer', 'DevOps Engineer']},
+                {'name': 'Data Science', 'trend': 'Up', 'growth': '20%', 'key_roles': ['Data Scientist', 'Data Analyst', 'ML Engineer']},
+                {'name': 'Cybersecurity', 'trend': 'Up', 'growth': '25%', 'key_roles': ['Security Analyst', 'Penetration Tester', 'Security Architect']}
+            ],
+            'Healthcare': [
+                {'name': 'Healthcare IT', 'trend': 'Up', 'growth': '18%', 'key_roles': ['Health Informatics Specialist', 'Clinical Analyst', 'Health Data Analyst']},
+                {'name': 'Nursing', 'trend': 'Up', 'growth': '12%', 'key_roles': ['Registered Nurse', 'Nurse Practitioner', 'Clinical Nurse Specialist']},
+                {'name': 'Medical Research', 'trend': 'Up', 'growth': '10%', 'key_roles': ['Research Scientist', 'Clinical Researcher', 'Biostatistician']}
+            ],
+            'Finance': [
+                {'name': 'FinTech', 'trend': 'Up', 'growth': '22%', 'key_roles': ['Financial Analyst', 'Quantitative Analyst', 'Risk Analyst']},
+                {'name': 'Investment Banking', 'trend': 'Stable', 'growth': '5%', 'key_roles': ['Investment Banker', 'Financial Advisor', 'Portfolio Manager']},
+                {'name': 'Accounting', 'trend': 'Up', 'growth': '8%', 'key_roles': ['CPA', 'Tax Specialist', 'Auditor']}
+            ]
+        }
+        
+        # Get industry analysis based on filter or career field
+        selected_industry = industry if industry else career_field
+        industry_analysis = industry_analysis_map.get(selected_industry, industry_analysis_map['Technology'])
+        
+        # Location data - adjust if location filter is applied
+        default_locations = [
+            {'name': 'San Francisco', 'job_openings': 15000, 'average_salary': int(base_salary * location_multipliers.get('San Francisco', 1.0))},
+            {'name': 'New York', 'job_openings': 12000, 'average_salary': int(base_salary * location_multipliers.get('New York', 1.0))},
+            {'name': 'Seattle', 'job_openings': 8000, 'average_salary': int(base_salary * location_multipliers.get('Seattle', 1.0))},
+            {'name': 'Boston', 'job_openings': 6000, 'average_salary': int(base_salary * location_multipliers.get('Boston', 1.0))},
+            {'name': 'Remote', 'job_openings': 25000, 'average_salary': int(base_salary * location_multipliers.get('Remote', 1.0))}
+        ]
+        
+        # If location filter is applied, prioritize that location
+        if location:
+            location_data = next((loc for loc in default_locations if loc['name'] == location), None)
+            if location_data:
+                top_locations = [location_data] + [loc for loc in default_locations if loc['name'] != location][:2]
+            else:
+                # Custom location
+                top_locations = [
+                    {'name': location, 'job_openings': 5000, 'average_salary': int(base_salary)},
+                    default_locations[0],
+                    default_locations[1]
+                ]
+        else:
+            top_locations = default_locations[:3]
+        
+        # Adjust salary based on location if specified
+        if location and location in location_multipliers:
+            base_salary = int(base_salary * location_multipliers[location])
+        
+        # Generate description based on filters
+        description_parts = [f'The {selected_industry} industry is experiencing strong growth']
+        if location:
+            description_parts.append(f'in {location}')
+        if experience_level:
+            description_parts.append(f'with {experience_level} positions')
+        description_parts.append('with increasing demand for skilled professionals.')
+        description = ' '.join(description_parts)
+        
         return {
             'overall_trends': {
                 'trend': 'Up',
-                'description': f'The {career_field} industry is experiencing strong growth with increasing demand for skilled professionals.'
+                'description': description
             },
-            'average_salary': 75000,
-            'industry_analysis': [
-                {
-                    'name': 'Software Development',
-                    'trend': 'Up',
-                    'growth': '15%',
-                    'key_roles': ['Software Engineer', 'Full Stack Developer', 'DevOps Engineer']
-                },
-                {
-                    'name': 'Data Science',
-                    'trend': 'Up',
-                    'growth': '20%',
-                    'key_roles': ['Data Scientist', 'Data Analyst', 'Machine Learning Engineer']
-                },
-                {
-                    'name': 'Cybersecurity',
-                    'trend': 'Up',
-                    'growth': '25%',
-                    'key_roles': ['Security Analyst', 'Penetration Tester', 'Security Architect']
-                }
-            ],
-            'top_locations': [
-                {
-                    'name': 'San Francisco',
-                    'job_openings': 15000,
-                    'average_salary': 120000
-                },
-                {
-                    'name': 'New York',
-                    'job_openings': 12000,
-                    'average_salary': 110000
-                },
-                {
-                    'name': 'Seattle',
-                    'job_openings': 8000,
-                    'average_salary': 105000
-                }
-            ]
+            'average_salary': base_salary,
+            'industry_analysis': industry_analysis,
+            'top_locations': top_locations
         }
     
     def post(self):

@@ -107,17 +107,46 @@ class GeminiService:
             logger.error(f"Failed to get career recommendations: {e}")
             return []
     
-    def analyze_skills_gap(self, user_skills: List[str], target_career: str) -> Dict[str, Any]:
-        """Analyze skills gap for a target career"""
-        prompt = f"""
-        Analyze the skills gap for someone with these skills: {', '.join(user_skills)}
-        who wants to pursue a career in: {target_career}
+    def analyze_skills_gap(self, user_profile: Dict[str, Any], target_career: str = None) -> Dict[str, Any]:
+        """Analyze skills gap based on user profile and target career"""
+        user_skills = user_profile.get('skills', [])
+        career_goals = user_profile.get('career_goals', [])
+        goals_text = user_profile.get('goals', '')
+        experience_level = user_profile.get('experience_level', 'beginner')
+        interests = user_profile.get('interests', [])
+        preferred_industries = user_profile.get('preferred_industries', [])
+        education = user_profile.get('education', '')
+        experience = user_profile.get('experience', '')
         
-        Please provide:
-        1. Missing skills needed for this career
-        2. Learning resources for each missing skill
-        3. Priority level for each skill
-        4. Estimated time to learn each skill
+        # Determine target career from user profile if not provided
+        if not target_career:
+            if career_goals:
+                target_career = career_goals[0] if isinstance(career_goals, list) else str(career_goals)
+            elif goals_text:
+                # Extract career mention from goals text (simplified)
+                target_career = goals_text[:100]  # Use first part of goals as context
+            else:
+                target_career = "general career development"
+        
+        prompt = f"""
+        Analyze the skills gap for a user with the following profile who wants to pursue: {target_career}
+        
+        User Profile:
+        - Current Skills: {', '.join(user_skills) if user_skills else 'None listed'}
+        - Career Goals: {', '.join(career_goals) if career_goals else 'Not specified'}
+        - Goals Description: {goals_text[:500] if goals_text else 'Not provided'}
+        - Experience Level: {experience_level}
+        - Interests: {', '.join(interests) if interests else 'Not specified'}
+        - Preferred Industries: {', '.join(preferred_industries) if preferred_industries else 'Not specified'}
+        - Education Background: {education[:300] if education else 'Not provided'}
+        - Work Experience: {experience[:300] if experience else 'Not provided'}
+        
+        Based on this profile and target career "{target_career}", provide a comprehensive skills gap analysis:
+        1. Identify missing skills needed for this career path
+        2. Analyze which existing skills are relevant and match the target career
+        3. Provide learning resources for each missing skill
+        4. Assign priority levels (high/medium/low) based on career relevance
+        5. Estimate time to learn each skill based on user's experience level
         
         Format as JSON:
         {{
@@ -125,13 +154,18 @@ class GeminiService:
                 {{
                     "skill_name": "skill name",
                     "priority": "high/medium/low",
-                    "time_to_learn": "estimated time",
-                    "learning_resources": ["resource1", "resource2"]
+                    "time_to_learn": "estimated time (e.g., 2-3 months)",
+                    "description": "brief description of why this skill is important",
+                    "learning_resources": ["resource1", "resource2", "resource3"],
+                    "projects": ["project idea 1", "project idea 2"]
                 }}
             ],
             "existing_skills_match": ["skill1", "skill2"],
+            "required_skills": ["all required skills for the career"],
             "overall_gap_score": 75
         }}
+        
+        Make sure the analysis is personalized to the user's experience level ({experience_level}), interests, and career goals.
         """
         
         try:
@@ -141,30 +175,96 @@ class GeminiService:
             logger.error(f"Failed to analyze skills gap: {e}")
             return {}
     
-    def get_job_market_analysis(self, career_field: str) -> Dict[str, Any]:
-        """Get job market analysis for a career field"""
-        prompt = f"""
-        Provide a comprehensive job market analysis for the career field: {career_field}
+    def get_job_market_analysis(self, user_profile: Dict[str, Any] = None, career_field: str = None, 
+                                 industry: str = None, location: str = None, experience_level: str = None) -> Dict[str, Any]:
+        """Get job market analysis based on user profile and filters"""
+        # Determine career field from user profile if not provided
+        if not career_field:
+            if user_profile:
+                career_goals = user_profile.get('career_goals', [])
+                goals_text = user_profile.get('goals', '')
+                if career_goals and len(career_goals) > 0:
+                    career_field = career_goals[0] if isinstance(career_goals, list) else str(career_goals)
+                elif goals_text:
+                    career_field = goals_text.split('.')[0][:50] if goals_text else 'Technology'
+                else:
+                    career_field = user_profile.get('preferred_industries', ['Technology'])[0] if user_profile.get('preferred_industries') else 'Technology'
+            else:
+                career_field = 'Technology'
         
-        Include:
-        1. Current market trends
-        2. Growth projections
-        3. Salary ranges
-        4. Job availability
-        5. Required skills
-        6. Geographic hotspots
-        7. Industry insights
+        # Build context from user profile
+        user_context = ""
+        if user_profile:
+            user_skills = user_profile.get('skills', [])
+            interests = user_profile.get('interests', [])
+            preferred_industries = user_profile.get('preferred_industries', [])
+            user_exp_level = user_profile.get('experience_level', experience_level or 'beginner')
+            
+            user_context = f"""
+            User Profile Context:
+            - Skills: {', '.join(user_skills) if user_skills else 'Not specified'}
+            - Interests: {', '.join(interests) if interests else 'Not specified'}
+            - Preferred Industries: {', '.join(preferred_industries) if preferred_industries else 'Not specified'}
+            - Experience Level: {user_exp_level}
+            """
+        
+        # Build filter context
+        filter_context = ""
+        if industry:
+            filter_context += f"- Filtered Industry: {industry}\n"
+        if location:
+            filter_context += f"- Filtered Location: {location}\n"
+        if experience_level:
+            filter_context += f"- Filtered Experience Level: {experience_level}\n"
+        
+        prompt = f"""
+        Provide a comprehensive, personalized job market analysis based on the following:
+        
+        Career Field/Industry: {career_field}
+        {user_context}
+        {filter_context}
+        
+        Provide analysis that includes:
+        1. Current market trends specific to this career/industry
+        2. Growth projections and future outlook
+        3. Salary ranges (adjusted for experience level if specified)
+        4. Job availability and demand
+        5. Required skills for this field
+        6. Top geographic locations for opportunities{" (focus on " + location + " if provided)" if location else ""}
+        7. Industry-specific insights
+        
+        {"Focus the analysis on: " + industry if industry else ""}
+        {"Focus on location: " + location if location else ""}
+        {"Adjust for experience level: " + experience_level if experience_level else ""}
         
         Format as JSON:
         {{
-            "market_trends": "trend description",
-            "growth_rate": "percentage",
-            "salary_range": "range",
+            "market_trends": "detailed trend description",
+            "growth_rate": "percentage or growth indicator",
+            "salary_range": "salary range (e.g., $60,000 - $120,000)",
+            "average_salary": 85000,
             "job_availability": "high/medium/low",
-            "required_skills": ["skill1", "skill2"],
-            "geographic_hotspots": ["location1", "location2"],
-            "industry_insights": "insights"
+            "required_skills": ["skill1", "skill2", "skill3"],
+            "geographic_hotspots": [
+                {{"name": "location1", "job_openings": 5000, "average_salary": 95000}},
+                {{"name": "location2", "job_openings": 3000, "average_salary": 90000}}
+            ],
+            "industry_insights": "detailed insights about the industry",
+            "industry_analysis": [
+                {{
+                    "name": "industry/role name",
+                    "trend": "Up/Down/Stable",
+                    "growth": "percentage",
+                    "key_roles": ["role1", "role2"]
+                }}
+            ],
+            "overall_trends": {{
+                "trend": "Up/Down/Stable",
+                "description": "comprehensive market overview"
+            }}
         }}
+        
+        Make the analysis personalized and relevant to the user's profile and filters. Include specific data points and actionable insights.
         """
         
         try:
