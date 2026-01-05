@@ -7,11 +7,13 @@ echo AI-Powered Career Counseling Platform
 echo Windows Setup Script
 echo ========================================
 echo.
+echo Starting setup process...
+echo.
 
 REM Check for Python
 echo [1/6] Checking Python installation...
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH
     echo Please install Python 3.8+ from https://www.python.org/downloads/
     echo Make sure to check "Add Python to PATH" during installation
@@ -25,7 +27,7 @@ echo.
 REM Check for Node.js
 echo [2/6] Checking Node.js installation...
 node --version >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ERROR] Node.js is not installed or not in PATH
     echo Please install Node.js from https://nodejs.org/
     pause
@@ -39,33 +41,15 @@ echo.
 REM Check for MongoDB
 echo [3/6] Checking MongoDB installation...
 mongod --version >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [WARNING] MongoDB is not installed or not in PATH
     echo Please install MongoDB from https://www.mongodb.com/try/download/community
     echo The application may not work without MongoDB
     echo.
 ) else (
-    mongod --version | findstr "version"
     echo [OK] MongoDB is installed
+    echo [NOTE] Make sure MongoDB service is running before starting the application
     echo.
-    
-    REM Check if MongoDB service is running
-    sc query MongoDB | findstr "RUNNING" >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo [WARNING] MongoDB service is not running
-        echo Attempting to start MongoDB service...
-        net start MongoDB >nul 2>&1
-        if %errorlevel% equ 0 (
-            echo [OK] MongoDB service started
-        ) else (
-            echo [WARNING] Could not start MongoDB service automatically
-            echo Please start it manually: net start MongoDB (as Administrator)
-        )
-        echo.
-    ) else (
-        echo [OK] MongoDB service is running
-        echo.
-    )
 )
 
 REM Create Python virtual environment
@@ -74,7 +58,7 @@ if not exist "backend\venv" (
     echo Creating virtual environment...
     cd backend
     python -m venv venv
-    if %errorlevel% neq 0 (
+    if errorlevel 1 (
         echo [ERROR] Failed to create virtual environment
         cd ..
         pause
@@ -89,17 +73,30 @@ echo.
 
 REM Install Python dependencies
 echo [5/6] Installing Python dependencies...
+if not exist "backend" (
+    echo [ERROR] backend directory not found
+    pause
+    exit /b 1
+)
 cd backend
-call venv\Scripts\activate.bat
-if %errorlevel% neq 0 (
-    echo [ERROR] Failed to activate virtual environment
+if not exist "venv\Scripts\activate.bat" (
+    echo [ERROR] Virtual environment not found. Please run step 4 first.
     cd ..
     pause
     exit /b 1
 )
+call venv\Scripts\activate.bat
+if not exist "requirements.txt" (
+    echo [ERROR] requirements.txt not found in backend directory
+    cd ..
+    pause
+    exit /b 1
+)
+echo Upgrading pip...
 python -m pip install --upgrade pip >nul 2>&1
+echo Installing Python packages (this may take a few minutes)...
 pip install -r requirements.txt
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo [ERROR] Failed to install Python dependencies
     cd ..
     pause
@@ -111,7 +108,18 @@ echo.
 
 REM Install Node.js dependencies
 echo [6/6] Installing Node.js dependencies...
+if not exist "frontend" (
+    echo [ERROR] frontend directory not found
+    pause
+    exit /b 1
+)
 cd frontend
+if not exist "package.json" (
+    echo [ERROR] package.json not found in frontend directory
+    cd ..
+    pause
+    exit /b 1
+)
 if not exist "node_modules" (
     echo Installing npm packages (this may take a few minutes)...
     call npm install
@@ -164,12 +172,20 @@ if /i "%seed_choice%"=="Y" (
     echo.
     echo Seeding database...
     cd backend
-    call venv\Scripts\activate.bat
-    python seed_database.py
-    if %errorlevel% equ 0 (
-        echo [OK] Database seeded successfully
+    if exist "venv\Scripts\activate.bat" (
+        call venv\Scripts\activate.bat
+    ) else if exist "venv\Scripts\activate" (
+        call venv\Scripts\activate
+    )
+    if exist "seed_database.py" (
+        python seed_database.py
+        if errorlevel 1 (
+            echo [WARNING] Database seeding failed, but you can run it later
+        ) else (
+            echo [OK] Database seeded successfully
+        )
     ) else (
-        echo [WARNING] Database seeding failed, but you can run it later
+        echo [WARNING] seed_database.py not found, skipping database seeding
     )
     cd ..
     echo.
