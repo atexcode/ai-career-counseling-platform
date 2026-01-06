@@ -91,6 +91,7 @@ python seed_database.py
 ```bash
 cd backend
 pip install -r requirements.txt
+python ..\seed_database.py
 python app.py
 ```
 
